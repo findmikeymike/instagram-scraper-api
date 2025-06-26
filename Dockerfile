@@ -18,9 +18,8 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install
 
-# Install Playwright browsers
-RUN npx playwright install chromium
-RUN npx playwright install-deps chromium
+# Puppeteer downloads Chromium automatically during npm install
+# No additional browser installation needed
 
 # Copy application code
 COPY . .

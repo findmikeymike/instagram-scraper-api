@@ -1,10 +1,39 @@
 import express from 'express';
-import { chromium } from 'playwright';
+import puppeteer from 'puppeteer';
 import cors from 'cors';
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(cors());
+
+// Simple rate limiting
+const requestCounts = new Map();
+const RATE_LIMIT = 10; // requests per minute
+const RATE_WINDOW = 60000; // 1 minute
+
+app.use((req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+
+  if (!requestCounts.has(ip)) {
+    requestCounts.set(ip, []);
+  }
+
+  const requests = requestCounts.get(ip);
+  // Remove old requests outside the window
+  const validRequests = requests.filter(time => now - time < RATE_WINDOW);
+
+  if (validRequests.length >= RATE_LIMIT) {
+    return res.status(429).json({
+      error: 'Rate limit exceeded',
+      message: `Maximum ${RATE_LIMIT} requests per minute`
+    });
+  }
+
+  validRequests.push(now);
+  requestCounts.set(ip, validRequests);
+  next();
+});
 
 // Health check endpoint
 app.get('/', (req, res) => {
@@ -31,8 +60,8 @@ app.post('/scrape', async (req, res) => {
   
   let browser;
   try {
-    // Launch browser with realistic settings
-    browser = await chromium.launch({ 
+    // Launch browser with Puppeteer (better for serverless)
+    browser = await puppeteer.launch({
       headless: true,
       args: [
         '--no-sandbox',
@@ -41,18 +70,20 @@ app.post('/scrape', async (req, res) => {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection'
       ]
     });
-    
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-      locale: 'en-US',
-      timezoneId: 'America/New_York'
-    });
-    
-    const page = await context.newPage();
+
+    const page = await browser.newPage();
+
+    // Set user agent and viewport
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1920, height: 1080 });
     
     // Navigate to Instagram profile
     console.log(`📱 Navigating to instagram.com/${username}`);
@@ -65,10 +96,13 @@ app.post('/scrape', async (req, res) => {
     await page.waitForTimeout(3000);
 
     // Check if profile exists
-    const profileExists = await page.locator('h2:has-text("Sorry, this page isn\'t available")').count() === 0;
-    if (!profileExists) {
-      await browser.close();
-      return res.status(404).json({ error: 'Instagram profile not found' });
+    const errorElement = await page.$('h2');
+    if (errorElement) {
+      const errorText = await page.evaluate(el => el.textContent, errorElement);
+      if (errorText && errorText.includes("Sorry, this page isn't available")) {
+        await browser.close();
+        return res.status(404).json({ error: 'Instagram profile not found' });
+      }
     }
 
     // Get profile info
@@ -117,7 +151,7 @@ app.post('/scrape', async (req, res) => {
         return Array.from(postElements).map(link => {
           const img = link.querySelector('img');
           const href = link.getAttribute('href');
-          
+
           return {
             url: href ? `https://www.instagram.com${href}` : '',
             imageUrl: img ? img.src : '',
