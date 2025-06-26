@@ -1,5 +1,6 @@
 import express from 'express';
-import puppeteer from 'puppeteer';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 import cors from 'cors';
 
 const app = express();
